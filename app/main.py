@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.auth.router import router as auth_router
+from app.tickets.router import router as ticket_router
 
 
 app = FastAPI(
@@ -10,7 +11,11 @@ app = FastAPI(
 )
 
 
+# Authentication APIs
 app.include_router(auth_router)
+
+# Ticket APIs
+app.include_router(ticket_router)
 
 
 @app.get("/")
