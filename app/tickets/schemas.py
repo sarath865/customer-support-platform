@@ -73,21 +73,90 @@ class TicketAssign(BaseModel):
 
 class TicketResponse(BaseModel):
     id: int
-
     customer_id: int
-
     assigned_agent_id: Optional[int] = None
-
     subject: str
-
     description: str
-
     priority: str
-
     status: str
-
     created_at: datetime
+    updated_at: datetime
 
+    class Config:
+        from_attributes = True
+
+
+# ============================================================
+# CREATE COMMENT
+# ============================================================
+
+class TicketCommentCreate(BaseModel):
+    comment: str = Field(
+        ...,
+        min_length=1,
+        description="Comment or reply on the ticket",
+    )
+
+
+# ============================================================
+# COMMENT RESPONSE
+# ============================================================
+
+class TicketCommentResponse(BaseModel):
+    id: int
+    ticket_id: int
+    user_id: int
+    comment: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================================
+# CREATE TICKET MESSAGE
+# ============================================================
+
+class TicketMessageCreate(BaseModel):
+    message: str = Field(
+        ...,
+        min_length=1,
+        description="Conversation message",
+    )
+
+    message_type: str = Field(
+        default="agent_reply",
+        description=(
+            "Message type: customer_reply, agent_reply, "
+            "system_message, internal_note"
+        ),
+    )
+
+
+# ============================================================
+# UPDATE TICKET MESSAGE
+# ============================================================
+
+class TicketMessageUpdate(BaseModel):
+    message: str = Field(
+        ...,
+        min_length=1,
+        description="Updated conversation message",
+    )
+
+
+# ============================================================
+# TICKET MESSAGE RESPONSE
+# ============================================================
+
+class TicketMessageResponse(BaseModel):
+    id: int
+    ticket_id: int
+    user_id: int
+    message: str
+    message_type: str
+    created_at: datetime
     updated_at: datetime
 
     class Config:

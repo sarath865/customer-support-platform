@@ -4,13 +4,18 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Ticket, User
+from app.models import Ticket, User, TicketComment, TicketMessage
 from app.auth.dependencies import get_current_user
 from app.tickets.schemas import (
     TicketCreate,
     TicketUpdate,
     TicketAssign,
     TicketResponse,
+    TicketCommentCreate,
+    TicketCommentResponse,
+    TicketMessageCreate,
+    TicketMessageUpdate,
+    TicketMessageResponse,
 )
 
 
@@ -35,14 +40,12 @@ def create_ticket(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Only customers can create tickets
     if current_user.role != "customer":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only customers can create tickets",
         )
 
-    # Validate priority
     allowed_priorities = {
         "low",
         "medium",
@@ -83,43 +86,34 @@ def list_tickets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Customer → only their own tickets
+    # Customer -> own tickets
     if current_user.role == "customer":
-
-        tickets = (
+        return (
             db.query(Ticket)
             .filter(Ticket.customer_id == current_user.id)
             .order_by(Ticket.created_at.desc())
             .all()
         )
 
-        return tickets
-
-    # Support agent → tickets assigned to them
+    # Support agent -> assigned tickets
     if current_user.role == "support_agent":
-
-        tickets = (
+        return (
             db.query(Ticket)
             .filter(Ticket.assigned_agent_id == current_user.id)
             .order_by(Ticket.created_at.desc())
             .all()
         )
 
-        return tickets
-
-    # Support manager / admin → all tickets
+    # Manager/Admin -> all tickets
     if current_user.role in {
         "support_manager",
         "admin",
     }:
-
-        tickets = (
+        return (
             db.query(Ticket)
             .order_by(Ticket.created_at.desc())
             .all()
         )
-
-        return tickets
 
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -152,7 +146,7 @@ def get_ticket(
             detail="Ticket not found",
         )
 
-    # Customer can only see their own ticket
+    # Customer -> own ticket only
     if current_user.role == "customer":
         if ticket.customer_id != current_user.id:
             raise HTTPException(
@@ -160,7 +154,7 @@ def get_ticket(
                 detail="You do not have permission to view this ticket",
             )
 
-    # Agent can only see assigned tickets
+    # Agent -> assigned ticket only
     elif current_user.role == "support_agent":
         if ticket.assigned_agent_id != current_user.id:
             raise HTTPException(
@@ -168,7 +162,7 @@ def get_ticket(
                 detail="You do not have permission to view this ticket",
             )
 
-    # Manager and admin can see everything
+    # Manager/Admin -> all tickets
     elif current_user.role not in {
         "support_manager",
         "admin",
@@ -207,7 +201,6 @@ def update_ticket(
             detail="Ticket not found",
         )
 
-    # Allowed roles
     if current_user.role not in {
         "customer",
         "support_agent",
@@ -219,32 +212,28 @@ def update_ticket(
             detail="You do not have permission to update tickets",
         )
 
-    # Customer can update only their own ticket
+    # Customer restrictions
     if current_user.role == "customer":
-
         if ticket.customer_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only update your own tickets",
             )
 
-        # Customer cannot change status
         if ticket_data.status is not None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Customers cannot change ticket status",
             )
 
-    # Agent can update only assigned tickets
+    # Agent restrictions
     if current_user.role == "support_agent":
-
         if ticket.assigned_agent_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only update tickets assigned to you",
             )
 
-    # Validate priority
     allowed_priorities = {
         "low",
         "medium",
@@ -261,7 +250,6 @@ def update_ticket(
             detail="Invalid priority",
         )
 
-    # Validate status
     allowed_statuses = {
         "open",
         "in_progress",
@@ -278,7 +266,6 @@ def update_ticket(
             detail="Invalid status",
         )
 
-    # Update only supplied fields
     if ticket_data.subject is not None:
         ticket.subject = ticket_data.subject
 
@@ -312,7 +299,6 @@ def assign_ticket(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Only manager and admin can assign tickets
     if current_user.role not in {
         "support_manager",
         "admin",
@@ -334,7 +320,6 @@ def assign_ticket(
             detail="Ticket not found",
         )
 
-    # Find assigned user
     agent = (
         db.query(User)
         .filter(User.id == assignment.assigned_agent_id)
@@ -347,7 +332,6 @@ def assign_ticket(
             detail="Assigned user not found",
         )
 
-    # Must be a support agent
     if agent.role != "support_agent":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -362,7 +346,6 @@ def assign_ticket(
 
     ticket.assigned_agent_id = agent.id
 
-    # Automatically move ticket to in_progress
     if ticket.status == "open":
         ticket.status = "in_progress"
 
@@ -370,3 +353,681 @@ def assign_ticket(
     db.refresh(ticket)
 
     return ticket
+
+
+# ============================================================
+# CREATE TICKET COMMENT
+# ============================================================
+
+@router.post(
+    "/{ticket_id}/comments",
+    response_model=TicketCommentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_ticket_comment(
+    ticket_id: int,
+    comment_data: TicketCommentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.id == ticket_id)
+        .first()
+    )
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ticket not found",
+        )
+
+    if current_user.role == "customer":
+        if ticket.customer_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only comment on your own tickets",
+            )
+
+    elif current_user.role == "support_agent":
+        if ticket.assigned_agent_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only comment on tickets assigned to you",
+            )
+
+    elif current_user.role not in {
+        "support_manager",
+        "admin",
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to comment on tickets",
+        )
+
+    comment = TicketComment(
+        ticket_id=ticket.id,
+        user_id=current_user.id,
+        comment=comment_data.comment,
+    )
+
+    db.add(comment)
+    db.commit()
+    db.refresh(comment)
+
+    return comment
+
+
+# ============================================================
+# LIST TICKET COMMENTS
+# ============================================================
+
+@router.get(
+    "/{ticket_id}/comments",
+    response_model=List[TicketCommentResponse],
+)
+def list_ticket_comments(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.id == ticket_id)
+        .first()
+    )
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ticket not found",
+        )
+
+    if current_user.role == "customer":
+        if ticket.customer_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to view these comments",
+            )
+
+    elif current_user.role == "support_agent":
+        if ticket.assigned_agent_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to view these comments",
+            )
+
+    elif current_user.role not in {
+        "support_manager",
+        "admin",
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to view these comments",
+        )
+
+    comments = (
+        db.query(TicketComment)
+        .filter(TicketComment.ticket_id == ticket_id)
+        .order_by(TicketComment.created_at.asc())
+        .all()
+    )
+
+    return comments
+
+
+# ============================================================
+# UPDATE TICKET COMMENT
+# ============================================================
+
+@router.patch(
+    "/{ticket_id}/comments/{comment_id}",
+    response_model=TicketCommentResponse,
+)
+def update_ticket_comment(
+    ticket_id: int,
+    comment_id: int,
+    comment_data: TicketCommentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.id == ticket_id)
+        .first()
+    )
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ticket not found",
+        )
+
+    comment = (
+        db.query(TicketComment)
+        .filter(
+            TicketComment.id == comment_id,
+            TicketComment.ticket_id == ticket_id,
+        )
+        .first()
+    )
+
+    if comment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Comment not found",
+        )
+
+    if current_user.role == "customer":
+        if ticket.customer_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only edit comments on your own tickets",
+            )
+
+        if comment.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only edit your own comments",
+            )
+
+    elif current_user.role == "support_agent":
+        if ticket.assigned_agent_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only edit comments on tickets assigned to you",
+            )
+
+        if comment.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only edit your own comments",
+            )
+
+    elif current_user.role not in {
+        "support_manager",
+        "admin",
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to edit comments",
+        )
+
+    comment.comment = comment_data.comment
+
+    db.commit()
+    db.refresh(comment)
+
+    return comment
+
+
+# ============================================================
+# DELETE TICKET COMMENT
+# ============================================================
+
+@router.delete(
+    "/{ticket_id}/comments/{comment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_ticket_comment(
+    ticket_id: int,
+    comment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.id == ticket_id)
+        .first()
+    )
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ticket not found",
+        )
+
+    comment = (
+        db.query(TicketComment)
+        .filter(
+            TicketComment.id == comment_id,
+            TicketComment.ticket_id == ticket_id,
+        )
+        .first()
+    )
+
+    if comment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Comment not found",
+        )
+
+    if current_user.role == "customer":
+        if ticket.customer_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete comments on your own tickets",
+            )
+
+        if comment.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete your own comments",
+            )
+
+    elif current_user.role == "support_agent":
+        if ticket.assigned_agent_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete comments on tickets assigned to you",
+            )
+
+        if comment.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete your own comments",
+            )
+
+    elif current_user.role not in {
+        "support_manager",
+        "admin",
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to delete comments",
+        )
+
+    db.delete(comment)
+    db.commit()
+
+    return None
+
+
+# ============================================================
+# HELPER - CHECK TICKET ACCESS
+# ============================================================
+
+def check_ticket_message_access(
+    ticket: Ticket,
+    current_user: User,
+):
+    """
+    Check whether the current user can access the ticket conversation.
+    """
+
+    # Customer -> own ticket only
+    if current_user.role == "customer":
+
+        if ticket.customer_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to access this ticket",
+            )
+
+    # Support agent -> assigned ticket only
+    elif current_user.role == "support_agent":
+
+        if ticket.assigned_agent_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to access this ticket",
+            )
+
+    # Manager/Admin -> all tickets
+    elif current_user.role not in {
+        "support_manager",
+        "admin",
+    }:
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access this ticket",
+        )
+
+
+# ============================================================
+# CREATE TICKET MESSAGE
+# ============================================================
+
+@router.post(
+    "/{ticket_id}/messages",
+    response_model=TicketMessageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_ticket_message(
+    ticket_id: int,
+    message_data: TicketMessageCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Find ticket
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.id == ticket_id)
+        .first()
+    )
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ticket not found",
+        )
+
+    # Check ticket access
+    check_ticket_message_access(
+        ticket,
+        current_user,
+    )
+
+    allowed_message_types = {
+        "customer_reply",
+        "agent_reply",
+        "system_message",
+        "internal_note",
+    }
+
+    if message_data.message_type not in allowed_message_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Invalid message type. Allowed types: "
+                "customer_reply, agent_reply, "
+                "system_message, internal_note"
+            ),
+        )
+
+    # Customer can only send customer replies
+    if current_user.role == "customer":
+
+        if message_data.message_type != "customer_reply":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Customers can only send customer replies",
+            )
+
+    # Support agent can send agent replies and internal notes
+    elif current_user.role == "support_agent":
+
+        if message_data.message_type not in {
+            "agent_reply",
+            "internal_note",
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Support agents can only send "
+                    "agent replies or internal notes"
+                ),
+            )
+
+    # Manager/Admin can create all message types
+    elif current_user.role in {
+        "support_manager",
+        "admin",
+    }:
+        pass
+
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to send messages",
+        )
+
+    message = TicketMessage(
+        ticket_id=ticket.id,
+        user_id=current_user.id,
+        message=message_data.message,
+        message_type=message_data.message_type,
+    )
+
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+
+    return message
+
+
+# ============================================================
+# LIST TICKET MESSAGES
+# ============================================================
+
+@router.get(
+    "/{ticket_id}/messages",
+    response_model=List[TicketMessageResponse],
+)
+def list_ticket_messages(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Find ticket
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.id == ticket_id)
+        .first()
+    )
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ticket not found",
+        )
+
+    # Check ticket access
+    check_ticket_message_access(
+        ticket,
+        current_user,
+    )
+
+    query = (
+        db.query(TicketMessage)
+        .filter(TicketMessage.ticket_id == ticket_id)
+    )
+
+    # Customers must NOT see internal notes
+    if current_user.role == "customer":
+
+        query = query.filter(
+            TicketMessage.message_type != "internal_note"
+        )
+
+    messages = (
+        query
+        .order_by(TicketMessage.created_at.asc())
+        .all()
+    )
+
+    return messages
+
+
+# ============================================================
+# UPDATE TICKET MESSAGE
+# ============================================================
+
+@router.put(
+    "/messages/{message_id}",
+    response_model=TicketMessageResponse,
+)
+def update_ticket_message(
+    message_id: int,
+    message_data: TicketMessageUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Find message
+    message = (
+        db.query(TicketMessage)
+        .filter(TicketMessage.id == message_id)
+        .first()
+    )
+
+    if message is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Message not found",
+        )
+
+    # Find ticket
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.id == message.ticket_id)
+        .first()
+    )
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ticket not found",
+        )
+
+    # Customer can edit own messages only
+    if current_user.role == "customer":
+
+        if ticket.customer_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to edit this message",
+            )
+
+        if message.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only edit your own messages",
+            )
+
+    # Support agent can edit own messages on assigned tickets
+    elif current_user.role == "support_agent":
+
+        if ticket.assigned_agent_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only edit messages on tickets assigned to you",
+            )
+
+        if message.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only edit your own messages",
+            )
+
+    # Manager/Admin can edit any message
+    elif current_user.role in {
+        "support_manager",
+        "admin",
+    }:
+        pass
+
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to edit messages",
+        )
+
+    # System messages should not be manually edited
+    if message.message_type == "system_message":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System messages cannot be edited",
+        )
+
+    message.message = message_data.message
+
+    db.commit()
+    db.refresh(message)
+
+    return message
+
+
+# ============================================================
+# DELETE TICKET MESSAGE
+# ============================================================
+
+@router.delete(
+    "/messages/{message_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_ticket_message(
+    message_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Find message
+    message = (
+        db.query(TicketMessage)
+        .filter(TicketMessage.id == message_id)
+        .first()
+    )
+
+    if message is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Message not found",
+        )
+
+    # Find ticket
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.id == message.ticket_id)
+        .first()
+    )
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ticket not found",
+        )
+
+    # System messages cannot be deleted
+    if message.message_type == "system_message":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System messages cannot be deleted",
+        )
+
+    # Customer can delete own messages only
+    if current_user.role == "customer":
+
+        if ticket.customer_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to delete this message",
+            )
+
+        if message.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete your own messages",
+            )
+
+    # Support agent can delete own messages on assigned tickets
+    elif current_user.role == "support_agent":
+
+        if ticket.assigned_agent_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete messages on tickets assigned to you",
+            )
+
+        if message.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete your own messages",
+            )
+
+    # Manager/Admin can delete any non-system message
+    elif current_user.role in {
+        "support_manager",
+        "admin",
+    }:
+        pass
+
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to delete messages",
+        )
+
+    db.delete(message)
+    db.commit()
+
+    return None
