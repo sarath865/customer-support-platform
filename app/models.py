@@ -103,6 +103,60 @@ class User(Base):
 
 
 # ============================================================
+# SLA POLICY MODEL
+# ============================================================
+
+class SLAPolicy(Base):
+    __tablename__ = "sla_policies"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    # Priority to which this SLA policy applies
+    priority = Column(
+        String(20),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    # Maximum time allowed for first response
+    first_response_minutes = Column(
+        Integer,
+        nullable=False,
+    )
+
+    # Maximum time allowed for ticket resolution
+    resolution_minutes = Column(
+        Integer,
+        nullable=False,
+    )
+
+    # Whether this SLA policy is currently active
+    is_active = Column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+# ============================================================
 # TICKET MODEL
 # ============================================================
 
@@ -149,6 +203,45 @@ class Ticket(Base):
         String(20),
         nullable=False,
         default="open",
+    )
+
+    # ========================================================
+    # SLA TRACKING
+    # ========================================================
+
+    # Deadline by which first response must happen
+    first_response_deadline = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    # Deadline by which ticket should be resolved
+    resolution_deadline = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    # Actual first response time
+    first_response_time = Column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Actual resolution time
+    resolution_time = Column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Current SLA state
+    # within_sla / at_risk / breached / completed
+    sla_status = Column(
+        String(20),
+        nullable=False,
+        default="within_sla",
+        index=True,
     )
 
     created_at = Column(
@@ -284,6 +377,10 @@ class TicketMessage(Base):
         nullable=False,
     )
 
+    # customer_reply
+    # agent_reply
+    # system_message
+    # internal_note
     message_type = Column(
         String(30),
         nullable=False,

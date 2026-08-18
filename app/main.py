@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from app.auth.router import router as auth_router
 from app.tickets.router import router as ticket_router
+from app.sla.router import router as sla_router
 
 
 app = FastAPI(
@@ -11,12 +12,30 @@ app = FastAPI(
 )
 
 
-# Authentication APIs
+# ============================================================
+# AUTHENTICATION APIs
+# ============================================================
+
 app.include_router(auth_router)
 
-# Ticket APIs
+
+# ============================================================
+# TICKET APIs
+# ============================================================
+
 app.include_router(ticket_router)
 
+
+# ============================================================
+# SLA APIs
+# ============================================================
+
+app.include_router(sla_router)
+
+
+# ============================================================
+# ROOT
+# ============================================================
 
 @app.get("/")
 def root():
@@ -26,8 +45,12 @@ def root():
     }
 
 
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
 @app.get("/health")
 def health_check():
     return {
-        "status": "healthy"
+        "status": "healthy",
     }

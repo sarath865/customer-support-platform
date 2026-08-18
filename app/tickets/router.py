@@ -1,10 +1,17 @@
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Ticket, User, TicketComment, TicketMessage
+from app.models import (
+    Ticket,
+    User,
+    TicketComment,
+    TicketMessage,
+    SLAPolicy,
+)
 from app.auth.dependencies import get_current_user
 from app.tickets.schemas import (
     TicketCreate,
@@ -23,6 +30,47 @@ router = APIRouter(
     prefix="/tickets",
     tags=["Tickets"],
 )
+
+
+def calculate_ticket_sla(
+    ticket: Ticket,
+    db: Session,
+):
+    """
+    Calculate SLA deadlines based on the ticket priority.
+    """
+
+    sla_policy = (
+        db.query(SLAPolicy)
+        .filter(
+            SLAPolicy.priority == ticket.priority,
+            SLAPolicy.is_active == True,
+        )
+        .first()
+    )
+
+    if sla_policy is None:
+        ticket.first_response_deadline = None
+        ticket.resolution_deadline = None
+        ticket.sla_status = "no_policy"
+        return
+
+    created_time = ticket.created_at
+
+    if created_time is None:
+        created_time = datetime.now(timezone.utc)
+
+    ticket.first_response_deadline = (
+        created_time
+        + timedelta(minutes=sla_policy.first_response_minutes)
+    )
+
+    ticket.resolution_deadline = (
+        created_time
+        + timedelta(minutes=sla_policy.resolution_minutes)
+    )
+
+    ticket.sla_status = "active"
 
 
 # ============================================================
@@ -65,9 +113,15 @@ def create_ticket(
         description=ticket_data.description,
         priority=ticket_data.priority,
         status="open",
+        sla_status="active",
     )
 
     db.add(ticket)
+    db.commit()
+    db.refresh(ticket)
+
+    calculate_ticket_sla(ticket, db)
+
     db.commit()
     db.refresh(ticket)
 
@@ -272,11 +326,17 @@ def update_ticket(
     if ticket_data.description is not None:
         ticket.description = ticket_data.description
 
+    priority_changed = False
+
     if ticket_data.priority is not None:
         ticket.priority = ticket_data.priority
+        priority_changed = True
 
     if ticket_data.status is not None:
         ticket.status = ticket_data.status
+
+    if priority_changed:
+        calculate_ticket_sla(ticket, db)
 
     db.commit()
     db.refresh(ticket)
