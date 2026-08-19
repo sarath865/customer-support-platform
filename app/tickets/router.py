@@ -11,6 +11,7 @@ from app.models import (
     TicketComment,
     TicketMessage,
     SLAPolicy,
+    AuditLog,
 )
 from app.auth.dependencies import get_current_user
 from app.tickets.schemas import (
@@ -31,6 +32,44 @@ router = APIRouter(
     tags=["Tickets"],
 )
 
+
+# ============================================================
+# AUDIT LOG HELPER
+# ============================================================
+
+def create_audit_log(
+    db: Session,
+    user_id: int,
+    ticket_id: int | None,
+    action: str,
+    description: str,
+    old_value: str | None = None,
+    new_value: str | None = None,
+):
+    """
+    Create an audit/history record.
+
+    The record is added to the current database transaction.
+    The calling endpoint is responsible for committing it.
+    """
+
+    audit_log = AuditLog(
+        user_id=user_id,
+        ticket_id=ticket_id,
+        action=action,
+        description=description,
+        old_value=old_value,
+        new_value=new_value,
+    )
+
+    db.add(audit_log)
+
+    return audit_log
+
+
+# ============================================================
+# SLA CALCULATION
+# ============================================================
 
 def calculate_ticket_sla(
     ticket: Ticket,
@@ -121,6 +160,18 @@ def create_ticket(
     db.refresh(ticket)
 
     calculate_ticket_sla(ticket, db)
+
+    create_audit_log(
+        db=db,
+        user_id=current_user.id,
+        ticket_id=ticket.id,
+        action="ticket_created",
+        description="Ticket created by customer",
+        new_value=(
+            f"priority={ticket.priority}, "
+            f"status={ticket.status}"
+        ),
+    )
 
     db.commit()
     db.refresh(ticket)
@@ -320,6 +371,12 @@ def update_ticket(
             detail="Invalid status",
         )
 
+    # Store old values for audit history
+    old_subject = ticket.subject
+    old_description = ticket.description
+    old_priority = ticket.priority
+    old_status = ticket.status
+
     if ticket_data.subject is not None:
         ticket.subject = ticket_data.subject
 
@@ -330,13 +387,70 @@ def update_ticket(
 
     if ticket_data.priority is not None:
         ticket.priority = ticket_data.priority
-        priority_changed = True
+        priority_changed = old_priority != ticket.priority
 
     if ticket_data.status is not None:
         ticket.status = ticket_data.status
 
     if priority_changed:
         calculate_ticket_sla(ticket, db)
+
+    # Audit: subject changed
+    if (
+        ticket_data.subject is not None
+        and old_subject != ticket.subject
+    ):
+        create_audit_log(
+            db=db,
+            user_id=current_user.id,
+            ticket_id=ticket.id,
+            action="ticket_updated",
+            description="Ticket subject updated",
+            old_value=old_subject,
+            new_value=ticket.subject,
+        )
+
+    # Audit: description changed
+    if (
+        ticket_data.description is not None
+        and old_description != ticket.description
+    ):
+        create_audit_log(
+            db=db,
+            user_id=current_user.id,
+            ticket_id=ticket.id,
+            action="ticket_updated",
+            description="Ticket description updated",
+            old_value=old_description,
+            new_value=ticket.description,
+        )
+
+    # Audit: priority changed
+    if priority_changed:
+        create_audit_log(
+            db=db,
+            user_id=current_user.id,
+            ticket_id=ticket.id,
+            action="priority_changed",
+            description="Ticket priority changed",
+            old_value=old_priority,
+            new_value=ticket.priority,
+        )
+
+    # Audit: status changed
+    if (
+        ticket_data.status is not None
+        and old_status != ticket.status
+    ):
+        create_audit_log(
+            db=db,
+            user_id=current_user.id,
+            ticket_id=ticket.id,
+            action="status_changed",
+            description="Ticket status changed",
+            old_value=old_status,
+            new_value=ticket.status,
+        )
 
     db.commit()
     db.refresh(ticket)
@@ -404,10 +518,43 @@ def assign_ticket(
             detail="Support agent is inactive",
         )
 
+    old_agent_id = ticket.assigned_agent_id
+
     ticket.assigned_agent_id = agent.id
 
     if ticket.status == "open":
         ticket.status = "in_progress"
+
+    create_audit_log(
+        db=db,
+        user_id=current_user.id,
+        ticket_id=ticket.id,
+        action=(
+            "ticket_reassigned"
+            if old_agent_id is not None
+            else "ticket_assigned"
+        ),
+        description="Ticket assigned to support agent",
+        old_value=(
+            str(old_agent_id)
+            if old_agent_id is not None
+            else None
+        ),
+        new_value=str(agent.id),
+    )
+
+    # If assignment automatically changed status
+    if ticket.status == "in_progress":
+        if old_agent_id is None:
+            create_audit_log(
+                db=db,
+                user_id=current_user.id,
+                ticket_id=ticket.id,
+                action="status_changed",
+                description="Ticket status changed after assignment",
+                old_value="open",
+                new_value="in_progress",
+            )
 
     db.commit()
     db.refresh(ticket)
@@ -472,6 +619,16 @@ def create_ticket_comment(
     )
 
     db.add(comment)
+
+    create_audit_log(
+        db=db,
+        user_id=current_user.id,
+        ticket_id=ticket.id,
+        action="comment_added",
+        description="Ticket comment added",
+        new_value=comment_data.comment,
+    )
+
     db.commit()
     db.refresh(comment)
 
@@ -613,7 +770,19 @@ def update_ticket_comment(
             detail="You do not have permission to edit comments",
         )
 
+    old_comment = comment.comment
+
     comment.comment = comment_data.comment
+
+    create_audit_log(
+        db=db,
+        user_id=current_user.id,
+        ticket_id=ticket.id,
+        action="comment_updated",
+        description="Ticket comment updated",
+        old_value=old_comment,
+        new_value=comment.comment,
+    )
 
     db.commit()
     db.refresh(comment)
@@ -696,6 +865,17 @@ def delete_ticket_comment(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to delete comments",
         )
+
+    deleted_comment = comment.comment
+
+    create_audit_log(
+        db=db,
+        user_id=current_user.id,
+        ticket_id=ticket.id,
+        action="comment_deleted",
+        description="Ticket comment deleted",
+        old_value=deleted_comment,
+    )
 
     db.delete(comment)
     db.commit()
@@ -841,6 +1021,43 @@ def create_ticket_message(
     )
 
     db.add(message)
+
+    # ========================================================
+    # FIRST RESPONSE SLA TRACKING
+    # ========================================================
+
+    if (
+        current_user.role in {
+            "support_agent",
+            "support_manager",
+            "admin",
+        }
+        and message_data.message_type == "agent_reply"
+        and ticket.first_response_time is None
+    ):
+        response_time = datetime.now(timezone.utc)
+
+        ticket.first_response_time = response_time
+
+        if (
+            ticket.first_response_deadline is not None
+            and response_time <= ticket.first_response_deadline
+        ):
+            ticket.sla_status = "within_sla"
+        else:
+            ticket.sla_status = "breached"
+
+    create_audit_log(
+        db=db,
+        user_id=current_user.id,
+        ticket_id=ticket.id,
+        action="message_sent",
+        description="Ticket conversation message sent",
+        new_value=(
+            f"type={message_data.message_type}"
+        ),
+    )
+
     db.commit()
     db.refresh(message)
 
@@ -990,7 +1207,19 @@ def update_ticket_message(
             detail="System messages cannot be edited",
         )
 
+    old_message = message.message
+
     message.message = message_data.message
+
+    create_audit_log(
+        db=db,
+        user_id=current_user.id,
+        ticket_id=ticket.id,
+        action="message_updated",
+        description="Ticket message updated",
+        old_value=old_message,
+        new_value=message.message,
+    )
 
     db.commit()
     db.refresh(message)
@@ -1086,6 +1315,17 @@ def delete_ticket_message(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to delete messages",
         )
+
+    deleted_message = message.message
+
+    create_audit_log(
+        db=db,
+        user_id=current_user.id,
+        ticket_id=ticket.id,
+        action="message_deleted",
+        description="Ticket message deleted",
+        old_value=deleted_message,
+    )
 
     db.delete(message)
     db.commit()

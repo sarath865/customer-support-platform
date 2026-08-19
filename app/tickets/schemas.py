@@ -75,12 +75,26 @@ class TicketResponse(BaseModel):
     id: int
     customer_id: int
     assigned_agent_id: Optional[int] = None
+
     subject: str
     description: str
     priority: str
     status: str
+
     created_at: datetime
     updated_at: datetime
+
+    # --------------------------------------------------------
+    # SLA INFORMATION
+    # --------------------------------------------------------
+
+    first_response_deadline: Optional[datetime] = None
+    resolution_deadline: Optional[datetime] = None
+
+    first_response_time: Optional[datetime] = None
+    resolution_time: Optional[datetime] = None
+
+    sla_status: str
 
     class Config:
         from_attributes = True

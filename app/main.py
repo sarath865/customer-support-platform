@@ -3,7 +3,13 @@ from fastapi import FastAPI
 from app.auth.router import router as auth_router
 from app.tickets.router import router as ticket_router
 from app.sla.router import router as sla_router
+from app.audit.router import router as audit_router
+from app.dashboard.router import router as dashboard_router
 
+
+# ============================================================
+# FASTAPI APPLICATION
+# ============================================================
 
 app = FastAPI(
     title="Customer Support & Helpdesk Management Platform",
@@ -27,14 +33,28 @@ app.include_router(ticket_router)
 
 
 # ============================================================
-# SLA APIs
+# SLA MANAGEMENT APIs
 # ============================================================
 
 app.include_router(sla_router)
 
 
 # ============================================================
-# ROOT
+# AUDIT & TICKET HISTORY APIs
+# ============================================================
+
+app.include_router(audit_router)
+
+
+# ============================================================
+# DASHBOARD & STATISTICS APIs
+# ============================================================
+
+app.include_router(dashboard_router)
+
+
+# ============================================================
+# ROOT ENDPOINT
 # ============================================================
 
 @app.get("/")

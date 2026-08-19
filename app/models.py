@@ -101,6 +101,13 @@ class User(Base):
         back_populates="user",
     )
 
+    # Audit logs created by this user
+    audit_logs = relationship(
+        "AuditLog",
+        foreign_keys="AuditLog.user_id",
+        back_populates="user",
+    )
+
 
 # ============================================================
 # SLA POLICY MODEL
@@ -285,6 +292,14 @@ class Ticket(Base):
         cascade="all, delete-orphan",
     )
 
+    # Audit/history records for this ticket
+    audit_logs = relationship(
+        "AuditLog",
+        foreign_keys="AuditLog.ticket_id",
+        back_populates="ticket",
+        cascade="all, delete-orphan",
+    )
+
 
 # ============================================================
 # TICKET COMMENT MODEL
@@ -411,4 +426,88 @@ class TicketMessage(Base):
         "User",
         foreign_keys=[user_id],
         back_populates="messages",
+    )
+
+
+# ============================================================
+# AUDIT LOG MODEL
+# ============================================================
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    # User who performed the action
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=True,
+        index=True,
+    )
+
+    # Ticket associated with the action
+    ticket_id = Column(
+        Integer,
+        ForeignKey("tickets.id"),
+        nullable=True,
+        index=True,
+    )
+
+    # Action performed
+    # Examples:
+    # ticket_created
+    # ticket_updated
+    # ticket_assigned
+    # ticket_reassigned
+    # status_changed
+    # priority_changed
+    # comment_added
+    # message_sent
+    action = Column(
+        String(50),
+        nullable=False,
+        index=True,
+    )
+
+    # Human-readable description
+    description = Column(
+        Text,
+        nullable=False,
+    )
+
+    # Previous value, if applicable
+    old_value = Column(
+        Text,
+        nullable=True,
+    )
+
+    # New value, if applicable
+    new_value = Column(
+        Text,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # User who performed the action
+    user = relationship(
+        "User",
+        foreign_keys=[user_id],
+        back_populates="audit_logs",
+    )
+
+    # Ticket associated with the action
+    ticket = relationship(
+        "Ticket",
+        foreign_keys=[ticket_id],
+        back_populates="audit_logs",
     )
