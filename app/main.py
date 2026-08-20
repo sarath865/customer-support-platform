@@ -5,6 +5,7 @@ from app.tickets.router import router as ticket_router
 from app.sla.router import router as sla_router
 from app.audit.router import router as audit_router
 from app.dashboard.router import router as dashboard_router
+from app.notifications.router import router as notification_router
 
 
 # ============================================================
@@ -51,6 +52,12 @@ app.include_router(audit_router)
 # ============================================================
 
 app.include_router(dashboard_router)
+
+# ============================================================
+# NOTIFICATION APIs
+# ============================================================
+
+app.include_router(notification_router)
 
 
 # ============================================================

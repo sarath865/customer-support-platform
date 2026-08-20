@@ -511,3 +511,85 @@ class AuditLog(Base):
         foreign_keys=[ticket_id],
         back_populates="audit_logs",
     )
+
+# ============================================================
+# NOTIFICATION MODEL
+# ============================================================
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    # User who should receive the notification
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    # Optional ticket associated with the notification
+    ticket_id = Column(
+        Integer,
+        ForeignKey("tickets.id"),
+        nullable=True,
+        index=True,
+    )
+
+    # Notification type
+    # Examples:
+    # ticket_created
+    # ticket_assigned
+    # ticket_updated
+    # new_message
+    # status_changed
+    # sla_warning
+    # sla_breached
+    notification_type = Column(
+        String(50),
+        nullable=False,
+        index=True,
+    )
+
+    # Notification title
+    title = Column(
+        String(200),
+        nullable=False,
+    )
+
+    # Notification message
+    message = Column(
+        Text,
+        nullable=False,
+    )
+
+    # Whether the user has read the notification
+    is_read = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # User receiving the notification
+    user = relationship(
+        "User",
+        foreign_keys=[user_id],
+    )
+
+    # Related ticket
+    ticket = relationship(
+        "Ticket",
+        foreign_keys=[ticket_id],
+    )

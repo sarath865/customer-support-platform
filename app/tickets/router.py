@@ -12,6 +12,7 @@ from app.models import (
     TicketMessage,
     SLAPolicy,
     AuditLog,
+    Notification,
 )
 from app.auth.dependencies import get_current_user
 from app.tickets.schemas import (
@@ -67,6 +68,41 @@ def create_audit_log(
     return audit_log
 
 
+# 
+# ============================================================
+# NOTIFICATION HELPER
+# ============================================================
+
+def create_notification(
+    db: Session,
+    user_id: int,
+    notification_type: str,
+    title: str,
+    message: str,
+    ticket_id: int | None = None,
+):
+    """
+    Create a notification for a user.
+
+    The notification is added to the current transaction.
+    The calling endpoint is responsible for committing it.
+    """
+
+    notification = Notification(
+        user_id=user_id,
+        ticket_id=ticket_id,
+        notification_type=notification_type,
+        title=title,
+        message=message,
+        is_read=False,
+    )
+
+    db.add(notification)
+
+    return notification
+
+
+
 # ============================================================
 # SLA CALCULATION
 # ============================================================
@@ -112,6 +148,7 @@ def calculate_ticket_sla(
     ticket.sla_status = "active"
 
 
+#  
 # ============================================================
 # CREATE TICKET
 # Customer can create a ticket
@@ -161,6 +198,10 @@ def create_ticket(
 
     calculate_ticket_sla(ticket, db)
 
+    # ========================================================
+    # AUDIT LOG
+    # ========================================================
+
     create_audit_log(
         db=db,
         user_id=current_user.id,
@@ -173,10 +214,28 @@ def create_ticket(
         ),
     )
 
+    # ========================================================
+    # CUSTOMER NOTIFICATION
+    # ========================================================
+
+    create_notification(
+        db=db,
+        user_id=current_user.id,
+        ticket_id=ticket.id,
+        notification_type="ticket_created",
+        title="Ticket Created",
+        message=(
+            f"Your support ticket #{ticket.id} "
+            f"has been created successfully."
+        ),
+    )
+
     db.commit()
     db.refresh(ticket)
 
     return ticket
+
+ 
 
 
 # ============================================================
@@ -452,6 +511,48 @@ def update_ticket(
             new_value=ticket.status,
         )
 
+        # Notify the customer when an agent/manager/admin changes status
+        if current_user.id != ticket.customer_id:
+            create_notification(
+                db=db,
+                user_id=ticket.customer_id,
+                ticket_id=ticket.id,
+                notification_type="status_changed",
+                title="Ticket Status Updated",
+                message=(
+                    f"Your ticket #{ticket.id} status changed "
+                    f"from {old_status} to {ticket.status}."
+                ),
+            )
+
+        # Notify the assigned agent when the customer changes status
+        elif ticket.assigned_agent_id is not None:
+            create_notification(
+                db=db,
+                user_id=ticket.assigned_agent_id,
+                ticket_id=ticket.id,
+                notification_type="status_changed",
+                title="Ticket Status Updated",
+                message=(
+                    f"Ticket #{ticket.id} status changed "
+                    f"from {old_status} to {ticket.status}."
+                ),
+            )
+
+    # Notify the customer about priority changes
+    if priority_changed and current_user.id != ticket.customer_id:
+        create_notification(
+            db=db,
+            user_id=ticket.customer_id,
+            ticket_id=ticket.id,
+            notification_type="priority_changed",
+            title="Ticket Priority Updated",
+            message=(
+                f"Your ticket #{ticket.id} priority changed "
+                f"from {old_priority} to {ticket.priority}."
+            ),
+        )
+
     db.commit()
     db.refresh(ticket)
 
@@ -543,6 +644,43 @@ def assign_ticket(
         new_value=str(agent.id),
     )
 
+    # Notify the newly assigned agent
+    if old_agent_id != agent.id:
+        create_notification(
+            db=db,
+            user_id=agent.id,
+            ticket_id=ticket.id,
+            notification_type=(
+                "ticket_reassigned"
+                if old_agent_id is not None
+                else "ticket_assigned"
+            ),
+            title=(
+                "Ticket Reassigned"
+                if old_agent_id is not None
+                else "New Ticket Assigned"
+            ),
+            message=(
+                f"Ticket #{ticket.id} has been "
+                f"{'reassigned' if old_agent_id is not None else 'assigned'} to you: "
+                f"{ticket.subject}"
+            ),
+        )
+
+    # Notify the customer about the assignment
+    if old_agent_id != agent.id:
+        create_notification(
+            db=db,
+            user_id=ticket.customer_id,
+            ticket_id=ticket.id,
+            notification_type="ticket_assigned",
+            title="Support Agent Assigned",
+            message=(
+                f"A support agent has been assigned to "
+                f"your ticket #{ticket.id}."
+            ),
+        )
+
     # If assignment automatically changed status
     if ticket.status == "in_progress":
         if old_agent_id is None:
@@ -628,6 +766,27 @@ def create_ticket_comment(
         description="Ticket comment added",
         new_value=comment_data.comment,
     )
+
+    # Notify the other participant in the ticket conversation
+    if current_user.id == ticket.customer_id:
+        if ticket.assigned_agent_id is not None:
+            create_notification(
+                db=db,
+                user_id=ticket.assigned_agent_id,
+                ticket_id=ticket.id,
+                notification_type="comment_added",
+                title="New Ticket Comment",
+                message=f"Customer added a comment to ticket #{ticket.id}.",
+            )
+    elif ticket.customer_id != current_user.id:
+        create_notification(
+            db=db,
+            user_id=ticket.customer_id,
+            ticket_id=ticket.id,
+            notification_type="comment_added",
+            title="New Ticket Comment",
+            message=f"A support team member commented on ticket #{ticket.id}.",
+        )
 
     db.commit()
     db.refresh(comment)
@@ -1057,6 +1216,29 @@ def create_ticket_message(
             f"type={message_data.message_type}"
         ),
     )
+
+    # Notify the other participant for customer/agent replies.
+    # Internal notes and system messages do not create customer notifications.
+    if message_data.message_type == "customer_reply":
+        if ticket.assigned_agent_id is not None:
+            create_notification(
+                db=db,
+                user_id=ticket.assigned_agent_id,
+                ticket_id=ticket.id,
+                notification_type="message_received",
+                title="New Customer Reply",
+                message=f"Customer replied to ticket #{ticket.id}.",
+            )
+    elif message_data.message_type == "agent_reply":
+        if current_user.id != ticket.customer_id:
+            create_notification(
+                db=db,
+                user_id=ticket.customer_id,
+                ticket_id=ticket.id,
+                notification_type="message_received",
+                title="New Support Reply",
+                message=f"A support agent replied to ticket #{ticket.id}.",
+            )
 
     db.commit()
     db.refresh(message)
